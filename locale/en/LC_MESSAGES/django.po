@@ -69,3 +69,15 @@ msgstr "Entity not found."
 
 msgid "tasks_management.validation.validate_unique_task_source"
 msgstr "Task sources already assigned to task groups: %(task_groups_by_source)"
+
+#: tasks_management/services.py
+msgid "tasks_management.validation.task.not_executor"
+msgstr "Only an executor of the task's group may resolve it."
+
+#: tasks_management/services.py
+msgid "tasks_management.validation.task.own_business_status_only"
+msgstr "An executor may only set their own status on the task."
+
+#: tasks_management/gql_mutations.py
+msgid "tasks_management.validation.task_group_not_found"
+msgstr "Task group not found."

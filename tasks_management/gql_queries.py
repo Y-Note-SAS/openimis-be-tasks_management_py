@@ -9,19 +9,13 @@ from graphene_django import DjangoObjectType
 from core import ExtendedConnection, prefix_filterset
 from core.gql_queries import UserGQLType
 from tasks_management.apps import TasksManagementConfig
-from tasks_management.models import TaskGroup, TaskExecutor, Task
+from core.gql.scoped_object_type import ScopedQuerysetMixin
+from tasks_management.models import TaskGroup, TaskExecutor, Task, is_task_triage
 
 DICT_STRING = "{}"
 
 
-def is_task_triage(user):
-    return user.has_perms(TasksManagementConfig.gql_task_group_create_perms
-                          + TasksManagementConfig.gql_task_group_search_perms
-                          + TasksManagementConfig.gql_task_group_update_perms
-                          + TasksManagementConfig.gql_task_group_delete_perms)
-
-
-class TaskGQLType(DjangoObjectType):
+class TaskGQLType(ScopedQuerysetMixin, DjangoObjectType):
     uuid = graphene.String(source='uuid')
     business_data = graphene.JSONString()
     entity_string = graphene.String()
@@ -77,18 +71,10 @@ class TaskGQLType(DjangoObjectType):
     def resolve_entity_string(self, info):
         return self.entity.__str__()
 
-    @classmethod
-    def get_queryset(cls, queryset, info):
-        user = info.context.user
-        if user.is_imis_admin or is_task_triage(user):
-            return queryset.filter(is_deleted=False)
-        return queryset.filter(
-            Q(task_group__taskexecutor__user=user) & ~Q(status=Task.Status.RECEIVED),
-            is_deleted=False
-        )
+    # the rows: Task.get_queryset (ScopedQuerysetMixin), shared with the mutations
 
 
-class TaskGroupGQLType(DjangoObjectType):
+class TaskGroupGQLType(ScopedQuerysetMixin, DjangoObjectType):
     uuid = graphene.String(source='uuid')
     user = graphene.List(UserGQLType)
 

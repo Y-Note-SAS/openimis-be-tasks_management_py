@@ -7,6 +7,8 @@ from django.db.models import Q
 
 from core.schema import OrderedDjangoFilterConnectionField
 from core.utils import append_validity_filter
+from core.gql import legacy_row_filters
+from core.models import Validity
 from tasks_management.gql_mutations import CreateTaskGroupMutation, UpdateTaskGroupMutation, DeleteTaskGroupMutation, \
     UpdateTaskMutation, ResolveTaskMutation
 from tasks_management.gql_queries import TaskGroupGQLType, TaskExecutorGQLType, TaskGQLType
@@ -47,7 +49,14 @@ class Query(graphene.ObjectType):
     )
 
     def resolve_task(self, info, **kwargs):
-        filters = append_validity_filter(**kwargs)
+        # the search right (191001) or the search-all one (191005); the rows are narrowed
+        # to the tasks the user may see by Task.get_queryset (TaskGQLType)
+        Query._check_task_search_permissions(info.context.user)
+        # validity is applied by Task.get_queryset: live tasks unless isDeleted asks
+        # otherwise (append_validity_filter filtered business-validity columns a task
+        # does not have)
+        legacy_row_filters(info, kwargs, validity=Validity.NOW)
+        filters = []
 
         client_mutation_id = kwargs.get("client_mutation_id")
         if client_mutation_id:
@@ -61,8 +70,9 @@ class Query(graphene.ObjectType):
         if entityIds:
             filters.append(Q(entity_id__in=entityIds))
 
-        # not checking perms because get_queryset filters tasks assigned to user
-        query = Task.objects.filter(*filters)
+        # scoped here already (validity left to TaskGQLType) so that the entity string
+        # search below reads the user's tasks only
+        query = Task.get_queryset(Task.objects.filter(*filters), info.context.user, validity=Validity.ALL)
 
         entity_string = kwargs.get("entityString__Icontains")
         if entity_string:
@@ -72,7 +82,12 @@ class Query(graphene.ObjectType):
         return gql_optimizer.query(query, info)
 
     def resolve_task_group(self, info, **kwargs):
-        filters = append_validity_filter(**kwargs)
+        # the task groups and their executors are the triage's: the search right is
+        # required (anonymous callers could list them and use `search` as a name oracle)
+        Query._check_permissions(info.context.user, TasksManagementConfig.gql_task_group_search_perms)
+        # live groups unless isDeleted asks otherwise (TaskGroup.get_queryset, OP-2029)
+        legacy_row_filters(info, kwargs, validity=Validity.NOW)
+        filters = []
 
         client_mutation_id = kwargs.get("client_mutation_id", None)
         if client_mutation_id:
@@ -103,6 +118,13 @@ class Query(graphene.ObjectType):
         Query._check_permissions(info.context.user, TasksManagementConfig.gql_task_group_search_perms)
         query = TaskExecutor.objects.filter(*filters)
         return gql_optimizer.query(query, info)
+
+    @staticmethod
+    def _check_task_search_permissions(user):
+        if type(user) is AnonymousUser or not user.id or not (
+                user.has_perms(TasksManagementConfig.gql_task_search_perms)
+                or user.has_perms(TasksManagementConfig.gql_task_search_all_perms)):
+            raise PermissionError("Unauthorized")
 
     @staticmethod
     def _check_permissions(user, perms):

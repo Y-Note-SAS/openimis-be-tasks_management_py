@@ -8,7 +8,8 @@ from typing import Dict, Type
 from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
 
-from django.core.exceptions import ValidationError
+from django.core.exceptions import PermissionDenied, ValidationError
+from django.utils.translation import gettext as _
 from core.datetimes.ad_datetime import AdDate, AdDatetime
 from core.forms import User
 from core.services import BaseService
@@ -67,14 +68,29 @@ class TaskService(BaseService):
     def resolve_task(self, obj_data):
         try:
             self.validation_class.validate_update(self.user, **obj_data)
-            obj = self.OBJECT_TYPE.objects.get(id=obj_data['id'])
-            incoming_status = obj_data.get('business_status')
+            # only an executor of the task's group resolves it (it was fetched unscoped)
+            obj = self.OBJECT_TYPE.executor_queryset(self.user).filter(id=obj_data['id']).first()
+            if obj is None:
+                raise PermissionDenied(_("tasks_management.validation.task.not_executor"))
+            incoming_status = self._own_business_status(obj_data.get('business_status'))
             additional_data = obj_data.get('additional_data')
             self._update_task_business_status(obj, incoming_status, additional_data)
             self._insert_additional_data_to_json_ext(obj, additional_data)
             return output_result_success({'task': model_representation(obj), 'user': {'id': f"{self.user.id}"}})
         except Exception as exc:
             return output_exception(model_name=self.OBJECT_TYPE.__name__, method="resolve", exception=exc)
+
+    def _own_business_status(self, incoming_status):
+        """
+        The executor writes their own entry only: {"<their user id>": status}. The status
+        is merged into the task's business_status, whose values decide its completion
+        (signals/on_task_resolve.py): an entry under another executor's id would approve
+        the task on their behalf.
+        """
+        own_key = str(self.user.id)
+        if not isinstance(incoming_status, dict) or set(incoming_status.keys()) != {own_key}:
+            raise PermissionDenied(_("tasks_management.validation.task.own_business_status_only"))
+        return incoming_status
 
     def _update_task_business_status(self, task, incoming_status, additional_data):
         try:

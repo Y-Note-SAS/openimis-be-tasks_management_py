@@ -2,12 +2,13 @@ import graphene as graphene
 from django.db import transaction
 from django.contrib.auth.models import AnonymousUser
 from pydantic.error_wrappers import ValidationError
+from django.core.exceptions import PermissionDenied, ValidationError as DjangoValidationError
 
 from core.gql.gql_mutations.base_mutation import BaseHistoryModelCreateMutationMixin, BaseMutation, \
     BaseHistoryModelUpdateMutationMixin, BaseHistoryModelDeleteMutationMixin
 from core.schema import OpenIMISMutation
 from tasks_management.apps import TasksManagementConfig
-from tasks_management.models import TaskGroup, Task, TaskMutation
+from tasks_management.models import TaskGroup, Task, TaskMutation, is_task_triage
 from tasks_management.services import TaskGroupService, TaskService
 
 
@@ -142,6 +143,17 @@ class UpdateTaskMutation(BaseHistoryModelUpdateMutationMixin, BaseMutation):
         if not user.has_perms(
                 TasksManagementConfig.gql_task_update_perms):
             raise ValidationError("mutation.authentication_required")
+        # the task must be one the user may see (Task.get_queryset), not any task by id
+        task = Task.get_queryset(Task.objects.filter(id=data['id']), user).first()
+        if task is None:
+            cls._object_not_exist_exception(obj_uuid=data['id'])
+        task_group_id = data.get('task_group_id')
+        if task_group_id is not None and str(task_group_id) != str(task.task_group_id):
+            # dispatching a task to another group is the triage's act, to a live group
+            if not (getattr(user, "is_imis_admin", False) or is_task_triage(user)):
+                raise PermissionDenied("unauthorized")
+            if not TaskGroup.objects.filter(id=task_group_id, is_deleted=False).exists():
+                raise DjangoValidationError("tasks_management.validation.task_group_not_found")
 
     @classmethod
     def _mutate(cls, user, **data):
@@ -169,6 +181,14 @@ class ResolveTaskMutation(BaseHistoryModelUpdateMutationMixin, BaseMutation):
     _mutation_class = "ResolveTaskMutation"
     _mutation_module = "tasks_management"
     _model = Task
+
+    @classmethod
+    def _validate_mutation(cls, user, **data):
+        # a login was enough: the task update right is required, and the service checks
+        # that the user executes the task's group and writes their own status only
+        super()._validate_mutation(user, **data)
+        if not user.has_perms(TasksManagementConfig.gql_task_update_perms):
+            raise PermissionDenied("unauthorized")
 
     @classmethod
     def _mutate(cls, user, **data):
